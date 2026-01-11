@@ -3,7 +3,6 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox
-import subprocess
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -12,6 +11,8 @@ from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 # =======================
 # AYARLAR
@@ -53,88 +54,31 @@ def is_driver_alive(drv):
         return False
 
 
-def find_chrome_path():
-    """
-    Windows'ta Chrome.exe yolunu otomatik bulur:
-    1) Registry (HKCU/HKLM App Paths)
-    2) Yaygın kurulum dizinleri
-    """
-    reg_queries = [
-        r'reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" /ve',
-        r'reg query "HKLM\Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" /ve',
-        r'reg query "HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" /ve',
-    ]
-
-    for cmd in reg_queries:
-        try:
-            out = subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL)
-            for line in out.splitlines():
-                if "REG_SZ" in line and "chrome.exe" in line.lower():
-                    path = line.split("REG_SZ")[-1].strip()
-                    if os.path.exists(path):
-                        return path
-        except Exception:
-            pass
-
-    candidates = [
-        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-    ]
-    for p in candidates:
-        if p and os.path.exists(p):
-            return p
-
-    return None
-
-
 def ensure_driver(status_cb, url: str):
-    """Driver yoksa başlatır, varsa canlıysa aynısını kullanır. URL'e gider."""
     global driver
     os.makedirs(PROFILE_DIR, exist_ok=True)
 
-    # Driver varsa canlıysa: URL'e git (tam otomatik için şart)
     if driver is not None and is_driver_alive(driver):
-        try:
-            log_to(status_cb, "Chrome zaten açık. URL'e gidiliyor...")
-            driver.get(url)
-            log_to(status_cb, "Hazır.")
-        except Exception as e:
-            log_to(status_cb, f"Hata: {e}")
+        log_to(status_cb, "Chrome zaten açık. URL'e gidiliyor...")
+        driver.get(url)
+        log_to(status_cb, "Hazır.")
         return
 
     log_to(status_cb, "Chrome başlatılıyor...")
 
     options = webdriver.ChromeOptions()
-
-    chrome_path = find_chrome_path()
-    if chrome_path:
-        options.binary_location = chrome_path
-        log_to(status_cb, f"Chrome bulundu: {chrome_path}")
-    else:
-        log_to(status_cb, "Chrome yolu bulunamadı. Chrome kurulu mu? (Yine de deniyorum...)")
-
     options.add_argument(f"--user-data-dir={PROFILE_DIR}")
     options.add_argument("--start-maximized")
 
     try:
-        driver = webdriver.Chrome(options=options)
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
         driver.get(url)
-        log_to(status_cb, "Chrome açıldı + URL yüklendi.")
+        log_to(status_cb, "Chrome açıldı + URL yüklendi. Hazır.")
     except Exception as e:
         driver = None
-        log_to(status_cb, f"Chrome açılamadı: {e}")
+        log_to(status_cb, f"Chrome başlatılamadı: {e}")
 
-
-def wait_for_anket_list_or_none():
-    """Anketler listesindeki 'Anketi Doldur' butonları görünür mü?"""
-    try:
-        WebDriverWait(driver, 3).until(
-            EC.presence_of_element_located((By.XPATH, ANKET_BUTTON_XPATH))
-        )
-        return True
-    except Exception:
-        return False
 
 
 def goto_anket_list(status_cb):
@@ -146,9 +90,6 @@ def goto_anket_list(status_cb):
     """
     global driver
 
-    if driver is None:
-        return False
-
     # 1) Zaten listede miyiz?
     if driver.find_elements(By.XPATH, ANKET_BUTTON_XPATH):
         return True
@@ -159,8 +100,11 @@ def goto_anket_list(status_cb):
 
     # 2) Menü / link tıklama denemeleri
     nav_xpaths = [
+        # Linkler
         "//a[contains(translate(normalize-space(.),'ANKET','anket'),'anket')]",
+        # Buttonlar
         "//button[contains(translate(normalize-space(.),'ANKET','anket'),'anket')]",
+        # Input submit/button value
         "//input[(contains(translate(@value,'ANKET','anket'),'anket') or contains(translate(@title,'ANKET','anket'),'anket'))]",
     ]
 
@@ -182,9 +126,10 @@ def goto_anket_list(status_cb):
         except Exception:
             continue
 
-    # 3) Olası URL patikalarını dene
+    # 3) Olası URL patikalarını dene (domain'i mevcut URL'den çıkarır)
     try:
         cur = driver.current_url
+        # https://derskayit.cu.edu.tr/.... -> https://derskayit.cu.edu.tr
         origin = cur.split("//", 1)[0] + "//" + cur.split("//", 1)[1].split("/", 1)[0]
     except Exception:
         origin = "https://derskayit.cu.edu.tr"
@@ -211,7 +156,6 @@ def goto_anket_list(status_cb):
     log_to(status_cb, "Anketler sayfasına gidemedim. (URL yanlış/menü yapısı farklı olabilir)")
     log_to(status_cb, f"Şu an URL: {driver.current_url}")
     return False
-
 
 # ---------- Puan tıklama ----------
 def find_labels_for_score(drv, score: int):
@@ -360,13 +304,14 @@ def click_save_and_return(status_cb, url: str):
         time.sleep(SCROLL_DELAY)
         driver.execute_script("arguments[0].click();", btn)
 
-        # Anketler sayfasına dönüş bekle
+        # Anketler sayfasına dönüş bekle: "Anketi Doldur" butonlarından biri gelsin
         WebDriverWait(driver, WAIT_SEC).until(
             EC.presence_of_element_located((By.XPATH, ANKET_BUTTON_XPATH))
         )
 
         log_to(status_cb, "Kaydet ve Anketlere Dön tamam.")
     except Exception as e:
+        # Her anket sonrası anket kalmadıysa burada timeout olabilir, o yüzden mesajı netleştiriyoruz
         log_to(status_cb, f"Kaydet hatası/anket listesi bekleme: {e}")
 
 
@@ -385,6 +330,10 @@ def close_driver(status_cb):
 
 # ---------- Anketler sayfasında sıradaki anketi aç ----------
 def click_next_anket_button(status_cb):
+    """
+    Anketler listesindeki ilk görünen 'Anketi Doldur' butonuna tıklar.
+    Tıklarsa True, yoksa False.
+    """
     global driver
 
     try:
@@ -426,26 +375,20 @@ def run_full_automation(status_cb, url: str, score: int, times_text: str):
         if driver is None:
             return
 
-        # Daha stabil: önce URL'e git
-        try:
-            driver.get(url)
-            time.sleep(0.6)
-        except Exception:
-            pass
-
         # ÖNCE: anketler listesine gerçekten git
         ok = goto_anket_list(status_cb)
         if not ok:
             return
 
         done = 0
-        max_loops = 300
+        max_loops = 300  # güvenlik
 
         for _ in range(max_loops):
             log_to(status_cb, f"Anket aranıyor... (tamamlanan: {done})")
 
             # Anket kalmadıysa bitir
             if not driver.find_elements(By.XPATH, ANKET_BUTTON_XPATH):
+                # bazen geç yüklenir
                 if not wait_for_anket_list_or_none():
                     log_to(status_cb, f"Bitti! Toplam doldurulan anket: {done}")
                     return
@@ -484,6 +427,7 @@ def run_full_automation(status_cb, url: str, score: int, times_text: str):
         log_to(status_cb, f"Tam otomatik hata: {e}")
 
 
+
 # =======================
 # GUI
 # =======================
@@ -491,7 +435,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Anket Botu")
-        self.geometry("840x490")
+        self.geometry("920x500")
         self.resizable(False, False)
 
         self.status_var = tk.StringVar(value="Hazır.")
@@ -501,7 +445,7 @@ class App(tk.Tk):
         frm.columnconfigure(0, weight=1)
         frm.columnconfigure(1, weight=0)
 
-        ttk.Label(frm, text="Anket Otomasyon Botu V1.1.0", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(frm, text="Anket Otomasyon Botu v1.1.0", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w")
 
         ttk.Label(frm, text="Hedef URL:", font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", pady=(10, 2))
         self.url_entry = ttk.Entry(frm)
@@ -513,8 +457,7 @@ class App(tk.Tk):
 
         ttk.Button(btnrow, text="Başlat (Chrome Aç + URL)", command=self.on_start).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(btnrow, text="Kapat", command=self.on_close).grid(row=0, column=1)
-        ttk.Button(btnrow, text="Kaydet ve Anketlere Dön",
-                   command=lambda: self.run_bg(click_save_and_return)).grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(btnrow, text="Kaydet ve Anketlere Dön", command=lambda: self.run_bg(click_save_and_return)).grid(row=0, column=2, padx=(8, 0))
 
         scoreframe = ttk.LabelFrame(frm, text="Puan Seç (Hızlı)")
         scoreframe.grid(row=4, column=0, sticky="we", pady=(6, 10))
@@ -541,6 +484,7 @@ class App(tk.Tk):
         footer = ttk.Label(frm, text="Made with love by Maxi <3", font=("Segoe UI", 9))
         footer.grid(row=8, column=0, sticky="e", pady=(10, 0))
 
+        # Yan panel
         side = ttk.LabelFrame(frm, text="Yan Kategori")
         side.grid(row=4, column=1, rowspan=4, sticky="ns", padx=(12, 0), pady=(6, 0))
 
@@ -556,9 +500,7 @@ class App(tk.Tk):
             state="readonly"
         ).pack(anchor="w", padx=10, pady=(0, 10))
 
-        ttk.Button(side, text="TAM OTOMATİK (Anket Bitene Kadar)", command=self.on_full_auto).pack(
-            fill="x", padx=10, pady=(0, 10)
-        )
+        ttk.Button(side, text="TAM OTOMATİK (Anket Bitene Kadar)", command=self.on_full_auto).pack(fill="x", padx=10, pady=(0, 10))
 
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
 
